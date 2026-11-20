@@ -2301,6 +2301,92 @@ const TYPES = {
 };
 </script>
   <script>
+// Kuzey Hub — canlı hareket motoru (cihaz web arayüzü ve telefon paneli ORTAK; teslim 1.3).
+// Cihaz hareket başlarken TEK mesaj gönderir: mf (başlangıç %), mt (hedef %), md (toplam ms), me (gönderilene kadar geçen ms),
+// ts (cihaz saati, varsa). Konum bundan bu cihazın KENDİ saatiyle (performance.now) her karede hesaplanır; arada mesaj yok.
+// Saat farkı sonucu bozmaz: referans mesajın ALINDIĞI andır; ağ gecikmesi (lat) çağıran tarafından verilir ve sınırlanır.
+// Kesin konum farklı gelirse sıçramadan kısa geçişle (EASE) hizalanır.
+const KzMotion = (() => {
+  const EASE = 350, LAT_MAX = 1500, OVERDUE = 2500;
+  const S = {};          // id -> {from,to,dur,t0} (hareket) | {fix} (duruyor); ek: e0/eT (geçiş başlangıcı)
+  const shown = {};      // id -> son çizilen konum
+  let raf = 0, draw = null, overdue = null;
+  const now = () => performance.now();
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  function raw(s, t) {
+    if (!s) return null;
+    if (s.fix != null) return s.fix;
+    const f = s.dur > 0 ? clamp((t - s.t0) / s.dur, 0, 1) : 1;
+    return s.from + (s.to - s.from) * f;
+  }
+  function pos(id, t) {
+    const s = S[id]; if (!s) return null;
+    t = t == null ? now() : t;
+    const r = raw(s, t);
+    if (s.eT && t < s.eT) { const k = (t - s.eT + EASE) / EASE; return s.e0 + (r - s.e0) * (k * (2 - k)); }
+    return r;
+  }
+  function set(id, s) {
+    const t = now(), cur = shown[id] != null ? shown[id] : pos(id, t);
+    const nr = raw(s, t);
+    if (cur != null && Math.abs(cur - nr) > 0.4) { s.e0 = cur; s.eT = t + EASE; }
+    S[id] = s; kick();
+  }
+  // d: cihazdan gelen kayıt/yanıt ({id,state,position,mf,mt,md,me}); lat: tahmini ağ gecikmesi (ms)
+  function sync(d, lat) {
+    if (!d || !d.id) return;
+    const moving = (d.state === 'opening' || d.state === 'closing') && typeof d.md === 'number';
+    if (!moving) { if (typeof d.position === 'number') set(d.id, { fix: d.position }); return; }
+    const t = now(), el = (d.me || 0) + clamp(lat || 0, 0, LAT_MAX);
+    const n = { from: d.mf, to: d.mt, dur: d.md, t0: t - el };
+    const o = S[d.id];
+    // Aynı hareketin tekrar bildirimi (yoklama, yayın + yanıt): 1 puandan az farkta çapa korunur (titreme olmaz)
+    if (o && o.fix == null && o.from === n.from && o.to === n.to && o.dur === n.dur && Math.abs(raw(o, t) - raw(n, t)) < 1) return;
+    set(d.id, n);
+  }
+  // Durdur: yanıtı beklemeden o anki konumda dondur; geri almak için önceki durum döner
+  function freeze(id) {
+    const prev = S[id]; if (!prev) return null;
+    const p = pos(id); S[id] = { fix: p }; shown[id] = p; kick();
+    return prev;
+  }
+  function restore(id, prev) { if (prev) { S[id] = prev; kick(); } }
+  function moving(id) { const s = S[id]; return !!(s && s.fix == null && now() - s.t0 < s.dur); }
+  // Yayın için gecikme tahmini: cihaz saati (ts) varsa alınış - ts (0..700 ms), yoksa 150 ms
+  function latFromTs(ts) {
+    if (typeof ts !== 'number') return 150;
+    const l = Date.now() - ts; return (l < 0 || l > 5000) ? 150 : Math.min(l, 700);
+  }
+  function frame() {
+    raf = 0;
+    const t = now(); let active = false;
+    for (const id in S) {
+      const s = S[id], p = pos(id, t);
+      if (p == null) continue;
+      if (shown[id] == null || Math.abs(shown[id] - p) >= 0.1) { shown[id] = p; if (draw) draw(id, p); }
+      if ((s.fix == null && t - s.t0 < s.dur) || (s.eT && t < s.eT)) active = true;
+      else if (s.fix == null && !s.od && t - s.t0 > s.dur + OVERDUE) { s.od = 1; if (overdue) overdue(id); }
+      if (s.fix == null && !s.od) active = true;
+    }
+    if (active) kick();
+  }
+  // Dondurulan/arka plana alınan sayfada bekleyen kare isteği düşebilir: 1 sn'den eski istek yenilenir, dönüşte de yeniden istenir
+  let rafAt = 0;
+  function kick(force) {
+    if (raf && (force || now() - rafAt > 1000)) { cancelAnimationFrame(raf); raf = 0; }
+    if (!raf) { rafAt = now(); raf = requestAnimationFrame(frame); }
+  }
+  ['visibilitychange', 'resume', 'pageshow', 'focus'].forEach((e) => (e === 'pageshow' || e === 'focus' ? window : document)
+    .addEventListener(e, () => kick(true)));
+  return {
+    sync, freeze, restore, pos, moving, latFromTs,
+    onDraw(fn) { draw = fn; }, onOverdue(fn) { overdue = fn; },
+    forget(id) { delete S[id]; delete shown[id]; },
+  };
+})();
+
+</script>
+  <script>
 /*
  * Kuzey Hub telefon paneli — uçtan uca şifreleme katmanı.
  * Firmware (include/cloud_bridge.h) ile birebir aynı zarf:
@@ -2618,6 +2704,7 @@ const TYPES = {
  * şifreleyip gönderir; cihaz anahtarı değiştirir (davet tek kullanımlık olur). Yeni anahtar yalnız bu tarayıcıda saklanır,
  * bağlantıdaki gizli kısım (#...) adres çubuğundan hemen silinir ve hiçbir sunucuya gitmez.
  * Komutlar: {op:"list",page} | {op:"cmd",id,command} | {op:"pos",id,position}; her mesajda zorunlu "ts" (ms).
+ * Canlı hareket (1.3): durum/liste mesajındaki mf/mt/md/me ile konum telefonun kendi saatiyle akıtılır (ui/motion.js).
  */
 (function () {
   'use strict';
@@ -2716,7 +2803,12 @@ const TYPES = {
     for (const w of st.waiters.slice()) {
       if (w.pred(msg)) { clearTimeout(w.timer); st.waiters = st.waiters.filter((x) => x !== w); w.resolve(msg); }
     }
-    if (msg.op === 'state' && msg.id) applyState(msg);
+    if (msg.op === 'state' && msg.id) {
+      // Kendi komutumuzun yanıtıysa gecikme = gidiş-dönüşün yarısı; başkasının (yayın) ise cihaz saatinden, sınırlı
+      const pc = st.pendingCmd;
+      const lat = (pc && pc.id === msg.id && performance.now() - pc.t0 < 6000) ? (performance.now() - pc.t0) / 2 : KzMotion.latFromTs(msg.ts);
+      applyState(msg, lat);
+    }
     if (msg.op === 'err' && msg.code === 'expired') toast('Telefon saati cihazla uyuşmuyor. Saat ayarını otomatik yapın.', 'danger');
   }
   function markHubOnline() {
@@ -2772,6 +2864,7 @@ const TYPES = {
         const r = await requestPage(p);
         all = all.concat(r.items || r.devices || []);
       }
+      all.forEach((d) => KzMotion.sync(d, d._lat));
       st.devices = all;
       lsSet(LS.list, { at: Date.now(), devices: all });
       const maxPage = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
@@ -2785,8 +2878,12 @@ const TYPES = {
   }
   async function requestPage(p) {
     const wait = waitFor((m) => m.op === 'list' && (m.page || 1) === p, 6000);
+    const t0 = performance.now();
     await sendOp({ op: 'list', page: p });
-    return wait;
+    const r = await wait;
+    const lat = (performance.now() - t0) / 2;
+    (r.items || r.devices || []).forEach((d) => { Object.defineProperty(d, '_lat', { value: lat, enumerable: false }); });
+    return r;
   }
 
   // ---------- çizim / kart ----------
@@ -2797,7 +2894,8 @@ const TYPES = {
     const typeDef = T ? (T[d.deviceType] || T.guillotine) : null;
     const single = d.bm === 's';
     const hasSensor = d.sn === 1 || d.positionVerified === true;
-    const pos = Math.max(0, Math.min(100, Number(d.position) || 0));
+    const mp = KzMotion.pos(d.id);
+    const pos = Math.max(0, Math.min(100, Math.round(mp != null ? mp : (Number(d.position) || 0))));
     let badgeClass = `badge-state-${d.state || 'stopped'}`, badge = stateLabel(d.state);
     if (single) {
       if (hasSensor) { badge = d.state === 'closed' ? 'Kapalı' : 'Açık'; badgeClass = `badge-state-${d.state === 'closed' ? 'closed' : 'open'}`; }
@@ -2863,10 +2961,26 @@ const TYPES = {
     const body = $('kzp-detail-body');
     body.innerHTML = `<div class="remote-card${$('kzp-conn').dataset.state === 'online' ? '' : ' kzp-disabled'}" style="box-shadow:none;border:none;padding:0;">${cardInner(d, true)}</div>`;
   }
-  function applyState(m) {
+  // Canlı hareket: her karede bu kumandanın çizimleri (liste + ayrıntı), yüzdesi ve sürgüsü
+  const sliderBusy = {};
+  KzMotion.onDraw((id, p) => {
+    const d = st.devices.find((x) => x.id === id);
+    if (!d || sliderBusy[id] || (d.bm === 's' && !(d.sn === 1 || d.positionVerified === true))) return;
+    const T = (typeof TYPES !== 'undefined') ? TYPES : null;
+    const typeDef = T ? (T[d.deviceType] || T.guillotine) : null;
+    if (typeDef) document.querySelectorAll(`.svg-canvas[data-open="${CSS.escape(id)}"]`).forEach((c) => { c.innerHTML = typeDef.draw(p, d.state, { verified: d.positionVerified === true }); });
+    const r = Math.round(p);
+    document.querySelectorAll(`[data-pct="${CSS.escape(id)}"]`).forEach((e) => { e.innerText = '%' + r; });
+    document.querySelectorAll(`[data-slider="${CSS.escape(id)}"]`).forEach((e) => { e.value = r; });
+  });
+  let overdueAt = 0;
+  KzMotion.onOverdue(() => { if (Date.now() - overdueAt > 3000 && st.mq && st.mq.connected) { overdueAt = Date.now(); refreshList(true); } });
+
+  function applyState(m, lat) {
     const d = st.devices.find((x) => x.id === m.id); if (!d) return;
     if (m.state) d.state = m.state;
     if (typeof m.position === 'number') d.position = m.position;
+    if (typeof m.position === 'number' || typeof m.md === 'number') KzMotion.sync(m, lat);
     lsSet(LS.list, { at: Date.now(), devices: st.devices });
     const card = document.getElementById('kzp-card-' + m.id);
     if (card) card.innerHTML = cardInner(d);
@@ -2879,6 +2993,9 @@ const TYPES = {
     if ($('kzp-conn').dataset.state !== 'online') { toast('Bağlantı yok', 'danger'); haptic('error'); return; }
     if (btn) btn.classList.add('btn-action-flash');
     const d = st.devices.find((x) => x.id === id);
+    const prevState = d ? d.state : null;
+    // Durdur: çizim yanıtı beklemeden ANINDA durur; komut cihaza ulaşmazsa geri alınır ve uyarılır
+    const frozen = command === 'stop' ? KzMotion.freeze(id) : null;
     if (d && d.bm !== 's') {
       if (command === 'open' || command === 'on') d.state = 'opening';
       else if (command === 'close' || command === 'off') d.state = 'closing';
@@ -2887,13 +3004,20 @@ const TYPES = {
     }
     try {
       const wait = waitFor((m) => (m.op === 'state' && m.id === id) || m.op === 'err' || m.error, 6000);
+      st.pendingCmd = { id, t0: performance.now() };
       await sendOp({ op: 'cmd', id, command });
       const r = await wait;
       if (r.op === 'err' || r.error) throw new Error(r.code || r.error);
       if (d && d.bm === 's') toast('Komut gönderildi', 'success');
     } catch (e) {
       haptic('error');
-      toast(e.message === 'zaman asimi' ? 'Cihaz yanıt vermedi' : 'Komut iletilemedi', 'danger');
+      if (frozen) {
+        KzMotion.restore(id, frozen);
+        if (d) { d.state = prevState; applyState({ id, state: prevState }); }
+        toast('Durdur komutu cihaza ulaşmadı — hareket sürüyor olabilir', 'danger');
+      } else {
+        toast(e.message === 'zaman asimi' ? 'Cihaz yanıt vermedi' : 'Komut iletilemedi', 'danger');
+      }
       refreshList(true);
     } finally { if (btn) setTimeout(() => btn.classList.remove('btn-action-flash'), 300); }
   }
@@ -2901,11 +3025,13 @@ const TYPES = {
     haptic();
     try {
       const wait = waitFor((m) => (m.op === 'state' && m.id === id) || m.op === 'err', 6000);
+      st.pendingCmd = { id, t0: performance.now() };
       await sendOp({ op: 'pos', id, position: Number(position) });
       const r = await wait;
+      sliderBusy[id] = false;
       if (r.op === 'err') throw new Error(r.code);
       toast(`Konum %${position} gönderildi`, 'success');
-    } catch (e) { haptic('error'); toast('Konum iletilemedi', 'danger'); refreshList(true); }
+    } catch (e) { sliderBusy[id] = false; haptic('error'); toast('Konum iletilemedi', 'danger'); refreshList(true); }
   }
 
   // ---------- eşleştirme ----------
@@ -2972,6 +3098,7 @@ const TYPES = {
     $('kzp-detail-body').addEventListener('click', onCardClick);
     const onSlider = (ev) => {
       const el = ev.target; if (!el.dataset || !el.dataset.slider) return;
+      sliderBusy[el.dataset.slider] = true;
       document.querySelectorAll(`[data-pct="${el.dataset.slider}"]`).forEach((p) => { p.innerText = '%' + el.value; });
       if (ev.type === 'change') sendPosition(el.dataset.slider, el.value);
     };
@@ -3029,7 +3156,11 @@ const TYPES = {
     }
     $('kzp-pair').hidden = true; $('kzp-main').hidden = false;
     const cached = lsGet(LS.list);
-    if (cached && Array.isArray(cached.devices)) { st.devices = cached.devices; render(); }
+    if (cached && Array.isArray(cached.devices)) {
+      // Önbellekteki hareket bilgisi eskidir: yalnız son konum gösterilir, canlı liste gelince akış sürer
+      st.devices = cached.devices.map((d) => { const c = Object.assign({}, d); delete c.md; delete c.mf; delete c.mt; delete c.me; return c; });
+      render();
+    }
     if (!navigator.onLine) { goOffline(); return; }
     if (st.mq && st.mq.connected) {           // eşleşmeden kalan bağlantıyı kullan
       setConn('connecting');
