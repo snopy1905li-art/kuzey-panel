@@ -3,8 +3,9 @@
  * Kabuğu (index.html) önbelleğe alır: internet yokken panel açılır ve "Bağlantı yok" gösterir.
  * Ağ öncelikli: çevrimiçiyken her açılışta en yeni sürüm alınır. Anahtar ya da kumanda verisi önbelleğe ALINMAZ.
  */
-// 1.5: sürüm artırıldı -> eski önbellekteki kabuk silinir, yeni panel alınır. Eşleşmeler localStorage'da (önbellekte değil): korunur.
-const CACHE = 'kuzey-panel-v2';
+// Önbellek sürümü panel değiştikçe artar (1.5: v2, 1.6 ortak panel: v3) -> eski kabuk silinir, yeni panel alınır.
+// Eşleşmeler localStorage'da (önbellekte değil): korunur.
+const CACHE = 'kuzey-panel-v3';
 const SHELL = ['./', './index.html'];
 
 self.addEventListener('install', (e) => {

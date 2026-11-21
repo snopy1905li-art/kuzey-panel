@@ -1117,6 +1117,19 @@ body.kzp { min-height: 100vh; padding-bottom: env(safe-area-inset-bottom); }
 .kzp-hubbar-label { font-size: 0.8rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
 .kzp-hubbar select { flex: 1; min-width: 0; font-weight: 600; }
 
+/* C6 ekleri (K6) — yalnız hub ilgili alanı gönderince oluşan öğeler; C3 hub'ında bu sınıflar hiç kullanılmaz */
+.kzp-c6-alarm { background: #b91c1c; color: #fff; border-radius: var(--radius-md); padding: 0.8rem 1rem; margin-bottom: 0.75rem;
+  font-weight: 600; box-shadow: 0 0 0 3px rgba(185, 28, 28, 0.25); }
+.kzp-c6-diger { display: block; width: 100%; margin: -0.5rem 0 1rem; padding: 0.6rem 0.9rem; border: 0; border-radius: var(--radius-md);
+  background: #b91c1c; color: #fff; font-weight: 700; text-align: left; cursor: pointer; font-size: 0.9rem; }
+.kzp-hubbar.kzp-hubbar-yangin select { border-color: #b91c1c; box-shadow: 0 0 0 2px rgba(185, 28, 28, 0.25); }
+.kzp-zs { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0 0 0.6rem; }
+.kzp-zs-i { font-size: 0.75rem; font-weight: 600; padding: 0.15rem 0.55rem; border-radius: 999px; background: var(--surface-2); color: var(--text-muted); }
+.kzp-zs-i.kzp-zs-aktif { background: var(--warning-light); color: var(--warning); }
+.kzp-zs-i.kzp-zs-tehlike { background: #b91c1c; color: #fff; }
+.kzp-zs-i.kzp-zs-yok { background: transparent; border: 1px dashed var(--border); }
+.badge.kzp-oa { background: var(--primary-light); color: var(--primary); margin-left: 0.3rem; }
+
 </style>
 </head>
 <body class="kzp">
@@ -2753,6 +2766,7 @@ const KzMotion = (() => {
     reconnectTimer: null,
     reconnectDelay: 2000,
     claimKey: null,      // eşleştirme sırasında üretilen yeni anahtar
+    c6al: {},            // C6 (yalnız hub "ab":1 gönderirse): hub kimliği t -> yangın alarmı var mı
   };
 
   // ---------- yardımcılar ----------
@@ -2857,7 +2871,7 @@ const KzMotion = (() => {
   }
   async function onMqttMessage(topic, text) {
     const pair = st.pair, gen = st.gen;
-    if (!pair || topic !== `rfhub/${pair.t}/dn/${pair.k}`) return;
+    if (!pair || topic !== `rfhub/${pair.t}/dn/${pair.k}`) { c6YanMesaj(topic, text); return; }
     let msg = null;
     const keys = [];
     if (st.claimKey) keys.push(st.claimKey);
@@ -2877,6 +2891,7 @@ const KzMotion = (() => {
       const lat = (pc && pc.id === msg.id && performance.now() - pc.t0 < 6000) ? (performance.now() - pc.t0) / 2 : KzMotion.latFromTs(msg.ts);
       applyState(msg, lat);
     }
+    if (msg.op === 'alarm') c6AlarmAyarla(pair, msg.alarm === 'yangin');   // C6: yangın başladı/bitti (C3 hiç göndermez)
     if (msg.op === 'err' && msg.code === 'expired') toast('Telefon saati cihazla uyuşmuyor. Saat ayarını otomatik yapın.', 'danger');
   }
   function markHubOnline() {
@@ -2901,6 +2916,7 @@ const KzMotion = (() => {
         mq.onMessage = onMqttMessage;
         mq.onClose = () => { if (gen !== st.gen || st.mq !== mq) return; st.hubOnline = false; goOffline(); scheduleReconnect(); };
         mq.subscribe(dnTopic());
+        c6YanHubs().forEach((h) => mq.subscribe(c6Dn(h)));   // C6: yalnız "ab" bildirmiş başka hub varsa
         if (st.mq && st.mq !== mq) {   // eski bağlantıyı SESSİZCE kapat (kapanma olayı "çevrimdışı" yapmasın)
           st.mq.onClose = () => {}; st.mq.onMessage = () => {};
           try { st.mq.close(); } catch (e) {}
@@ -2912,7 +2928,7 @@ const KzMotion = (() => {
         // Cihaz bu aracıda mı? (cihaz yedek aracıya geçmiş olabilir) — liste isteğiyle sına
         const ok = await refreshList(true);
         if (gen !== st.gen) return false;
-        if (ok) { st.brokerIdx = idx; lsSet(LS.broker, idx); st.reconnectDelay = 2000; return true; }
+        if (ok) { st.brokerIdx = idx; lsSet(LS.broker, idx); st.reconnectDelay = 2000; c6Yokla(); return true; }
         mq.close();
       } catch (e) { /* sıradaki aracı */ }
     }
@@ -2935,11 +2951,16 @@ const KzMotion = (() => {
     try {
       const first = await requestPage(1);
       let all = first.items || first.devices || [];
+      const kirp = [];
+      if (first.zsk) kirp.push(...all);
       for (let p = 2; p <= (first.pages || 1); p++) {
         const r = await requestPage(p);
+        if (r.zsk) kirp.push(...(r.items || r.devices || []));
         all = all.concat(r.items || r.devices || []);
       }
       if (gen !== st.gen || pair !== st.pair) return false;   // bu liste artık seçili hub'ın değil
+      c6ListeUst(pair, first);
+      kirp.forEach((d) => { const o = st.devices.find((x) => x.id === d.id); if (o && o.zs) d.zs = o.zs; });   // C6: sayfa kırpıldı
       if (first.hub && (first.hub !== pair.hubName || first.ek !== pair.ek)) {   // 1.5 cihaz: hub adı ve eki
         pair.hubName = String(first.hub).slice(0, 40); pair.ek = String(first.ek || ''); saveStore(); renderHubBar();
       }
@@ -2981,6 +3002,7 @@ const KzMotion = (() => {
       else { badge = ''; } // tek tuşlu + sensörsüz: Açık/Kapalı gösterilmez
     }
     const drawing = typeDef ? typeDef.draw(single && !hasSensor ? 50 : pos, d.state, { verified: d.positionVerified === true }) : '';
+    const c6 = c6KartEk(d);   // C6: yalnız zs / oa alanı varsa; yoksa boş (kart bugünküyle aynı)
     let slider = '';
     if (!single && (!isLight(d) || d.deviceType === 'light_dimmer')) {
       slider = `
@@ -3004,7 +3026,7 @@ const KzMotion = (() => {
         <button type="button" class="btn btn-control-close" data-cmd="close" data-id="${esc(d.id)}"><span class="btn-icon-sub">▼</span> Kapat</button></div>`;
     }
     const top = big
-      ? `<div class="card-top"><div class="card-type-label">${typeDef ? esc(typeDef.label) : ''}</div><div class="card-badges">${badge ? `<span class="badge ${badgeClass}">${badge}</span>` : ''}</div></div>`
+      ? `<div class="card-top"><div class="card-type-label">${typeDef ? esc(typeDef.label) : ''}</div><div class="card-badges">${badge ? `<span class="badge ${badgeClass}">${badge}</span>` : ''}${c6.rozet}</div></div>`
       : null;
     return (top ? top : `
       <div class="card-top">
@@ -3012,8 +3034,8 @@ const KzMotion = (() => {
           <div class="card-icon" aria-hidden="true">${typeDef ? typeDef.icon : ''}</div>
           <div><div class="card-name">${esc(d.name)}</div><div class="card-type-label">${typeDef ? esc(typeDef.label) : ''}</div></div>
         </div>
-        <div class="card-badges">${badge ? `<span class="badge ${badgeClass}">${badge}</span>` : ''}</div>
-      </div>`) + `
+        <div class="card-badges">${badge ? `<span class="badge ${badgeClass}">${badge}</span>` : ''}${c6.rozet}</div>
+      </div>`) + c6.sensor + `
       <div class="svg-canvas" data-open="${esc(d.id)}"${big ? ' style="height:220px"' : ''}>${drawing}</div>
       ${slider}
       ${controls}`;
@@ -3060,6 +3082,10 @@ const KzMotion = (() => {
     if (m.state) d.state = m.state;
     if (typeof m.position === 'number') d.position = m.position;
     if (typeof m.position === 'number' || typeof m.md === 'number') KzMotion.sync(m, lat);
+    if (st.pair && st.pair.ab) {   // C6: yalnız "ab" bildiren hub
+      if (typeof m.zs === 'string') d.zs = m.zs; else delete d.zs;
+      if (m.oa === 1) d.oa = 1; else delete d.oa;
+    }
     if (st.pair) lsSet(listKey(st.pair.t), { at: Date.now(), devices: st.devices });
     const card = document.getElementById('kzp-card-' + m.id);
     if (card) card.innerHTML = cardInner(d);
@@ -3256,7 +3282,7 @@ const KzMotion = (() => {
     $('kzp-pair').hidden = true; $('kzp-main').hidden = false;
     const cached = lsGet(listKey(pair.t));
     st.devices = (cached && Array.isArray(cached.devices) ? cached.devices : [])
-      .map((d) => { const c = Object.assign({}, d); delete c.md; delete c.mf; delete c.mt; delete c.me; return c; });
+      .map((d) => { const c = Object.assign({}, d); delete c.md; delete c.mf; delete c.mt; delete c.me; delete c.oa; return c; });
     st.page = 1;
     render();
     renderHubBar();
@@ -3283,9 +3309,97 @@ const KzMotion = (() => {
     const hs = visibleHubs();
     const bar = $('kzp-hubbar'), sel = $('kzp-hub-sel');
     bar.hidden = hs.length < 2;
-    sel.innerHTML = hs.map((h) => `<option value="${esc(h.t)}"${h === st.pair ? ' selected' : ''}>${esc(hubLabel(h))}</option>`).join('');
+    sel.innerHTML = hs.map((h) => `<option value="${esc(h.t)}"${h === st.pair ? ' selected' : ''}>${st.c6al[h.t] ? 'YANGIN! ' : ''}${esc(hubLabel(h))}</option>`).join('');
     $('kzp-title').innerText = hs.length > 1 && st.pair ? hubLabel(st.pair) : 'Kuzey Hub';
+    c6Ciz();
   }
+
+  // ---------- C6 ekleri (K6) — YALNIZ hub ilgili alanı gönderirse devreye girer ----------
+  // Alanlar: liste 1. sayfası "ab":1 (bu hub alarm bildirir) + "alarm":"yangin"; {"op":"alarm","alarm":"yangin"|""} anlık bildirim;
+  // öğede "zs" (sensör özeti: h hareket, k kapı/pencere, s su, d duman; BÜYÜK = aktif; ardından "-" = bağlantı yok), "oa":1
+  // (hareketi otomasyon başlattı), sayfada "zsk":1 (sensör özeti bu sayfaya sığmadı). C3 hiçbirini göndermez -> panel aynı.
+  const c6Dn = (h) => `rfhub/${h.t}/dn/${h.k}`;
+  const c6YanHubs = () => visibleHubs().filter((h) => h.ab && h !== st.pair);
+  const C6ZS = { h: ['Hareket', 'var', 'yok'], k: ['Kapı/pencere', 'açık', 'kapalı'], s: ['Su', 'var', 'yok'], d: ['Duman', 'VAR', 'yok'] };
+  function c6KartEk(d) {
+    let sensor = '', rozet = '';
+    if (typeof d.zs === 'string' && d.zs) {
+      const ps = [];
+      for (let i = 0; i < d.zs.length; i++) {
+        const c = d.zs[i], t = C6ZS[c.toLowerCase()];
+        if (!t) continue;
+        const aktif = c !== c.toLowerCase(), kopuk = d.zs[i + 1] === '-';
+        if (kopuk) i++;
+        const cls = kopuk ? 'kzp-zs-yok' : (aktif ? (c === 'D' ? 'kzp-zs-tehlike' : 'kzp-zs-aktif') : '');
+        ps.push(`<span class="kzp-zs-i ${cls}">${t[0]}: ${kopuk ? 'bağlantı yok' : (aktif ? t[1] : t[2])}</span>`);
+      }
+      if (ps.length) sensor = `<div class="kzp-zs" aria-label="Sensörler">${ps.join('')}</div>`;
+    }
+    if (d.oa === 1 && (d.state === 'opening' || d.state === 'closing')) rozet = '<span class="badge kzp-oa" title="Bu hareketi bir otomasyon kuralı başlattı">Otomasyon</span>';
+    return { sensor, rozet };
+  }
+  function c6ListeUst(h, first) {
+    if (first.ab === 1) {
+      if (!h.ab) { h.ab = 1; saveStore(); }
+      c6AlarmAyarla(h, first.alarm === 'yangin');
+    } else if (h.ab && (first.page || 1) === 1) {   // hub artık bildirmiyor (C3 yazılımı yüklendi): işareti kaldır
+      delete h.ab; saveStore(); c6AlarmAyarla(h, false);
+    }
+  }
+  function c6AlarmAyarla(h, var_) {
+    if (!h || !!st.c6al[h.t] === var_) return;
+    if (var_) st.c6al[h.t] = 1; else delete st.c6al[h.t];
+    if (var_) haptic('error');
+    renderHubBar();
+  }
+  // Seçili hub'ın bandı ana ekranın başında; başka hub'da yangın varsa seçicinin altında geçiş düğmesi
+  function c6Ciz() {
+    const main = $('kzp-main'); if (!main) return;
+    let band = $('kzp-c6-alarm');
+    const buHub = st.pair && st.c6al[st.pair.t];
+    if (buHub && !band) {
+      band = document.createElement('div');
+      band.id = 'kzp-c6-alarm'; band.className = 'kzp-c6-alarm'; band.setAttribute('role', 'alert');
+      band.innerHTML = '<strong>YANGIN ALARMI</strong> — duman algılandı. Binayı kontrol edin.';
+      main.insertBefore(band, main.firstChild);
+    } else if (!buHub && band) band.remove();
+    if (band) band.dataset.hub = st.pair.t;
+    const digerleri = visibleHubs().filter((h) => h !== st.pair && st.c6al[h.t]);
+    let diger = $('kzp-c6-diger');
+    const bar = $('kzp-hubbar');
+    if (digerleri.length && !diger) {
+      diger = document.createElement('button');
+      diger.type = 'button'; diger.id = 'kzp-c6-diger'; diger.className = 'kzp-c6-diger';
+      diger.onclick = () => { const h = visibleHubs().find((x) => x !== st.pair && st.c6al[x.t]); if (h) { haptic(); useHub(h, true); } };
+      bar.parentNode.insertBefore(diger, bar.nextSibling);
+    } else if (!digerleri.length && diger) { diger.remove(); diger = null; }
+    if (diger) diger.textContent = `YANGIN: ${digerleri.map(hubLabel).join(', ')} — göster`;
+    if (bar) bar.classList.toggle('kzp-hubbar-yangin', digerleri.length > 0);
+  }
+  // Seçili olmayan C6 hub'ından gelen mesaj: yalnız alarm bilgisi alınır (kartlara HİÇBİR şey yazılmaz)
+  async function c6YanMesaj(topic, text) {
+    const h = c6YanHubs().find((x) => c6Dn(x) === topic); if (!h) return;
+    let m = null;
+    try { m = await C.open(h.t, Number(h.k), C.b64urlDecode(h.s), text); } catch (e) { return; }
+    if (h === st.pair) return;   // çözülürken bu hub seçildi: kendi kanalı işler
+    if (m.op === 'alarm') c6AlarmAyarla(h, m.alarm === 'yangin');
+    else if (m.op === 'list' && (m.page || 1) === 1 && m.ab === 1) c6AlarmAyarla(h, m.alarm === 'yangin');
+  }
+  // Seçili olmayan C6 hub'larına küçük yoklama (açılışta ve dakikada bir): her biri KENDİ anahtarıyla, kendi konusuna
+  async function c6Yokla() {
+    const mq = st.mq; if (!mq || !mq.connected) return;
+    for (const h of c6YanHubs()) {
+      try {
+        const env = await C.seal(h.t, Number(h.k), C.b64urlDecode(h.s), { op: 'list', page: 1, ts: nowTs() });
+        if (mq === st.mq && h !== st.pair) mq.publish(`rfhub/${h.t}/up`, env);
+      } catch (e) {}
+    }
+  }
+  setInterval(() => {
+    if (document.hidden || !st.mq || !st.mq.connected || !st.store) return;
+    if (st.pair && st.pair.ab) refreshList(true);   // C6: sensör göstergesi tazelenir (C3 hub'ında yoklama yok)
+    c6Yokla();
+  }, 60000);
 
   // ---------- başlangıç ----------
   async function start() {
