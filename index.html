@@ -1111,6 +1111,12 @@ body.kzp { min-height: 100vh; padding-bottom: env(safe-area-inset-bottom); }
   .kzp-pager .btn { min-width: 0; }
 }
 
+/* 1.5: birden çok hub — üstte seçici (tek hub'da gizli) */
+.kzp-hubbar { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 1rem; }
+.kzp-hubbar[hidden] { display: none; }
+.kzp-hubbar-label { font-size: 0.8rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.kzp-hubbar select { flex: 1; min-width: 0; font-weight: 600; }
+
 </style>
 </head>
 <body class="kzp">
@@ -1144,6 +1150,11 @@ body.kzp { min-height: 100vh; padding-bottom: env(safe-area-inset-bottom); }
   </header>
 
   <main class="container">
+    <!-- 1.5: birden çok hub varken seçici (ad; bağlantı durumu üstteki rozette, seçili hub için) -->
+    <div class="kzp-hubbar" id="kzp-hubbar" hidden>
+      <label for="kzp-hub-sel" class="kzp-hubbar-label">Hub</label>
+      <select id="kzp-hub-sel" class="form-input" aria-label="Hub seç"></select>
+    </div>
     <div class="notice-box kzp-banner" id="kzp-offline" hidden>
       Bağlantı yok. Son bilinen durum gösteriliyor; komut gönderilemez. İnternet bağlantınızı kontrol edin.
     </div>
@@ -1193,7 +1204,14 @@ body.kzp { min-height: 100vh; padding-bottom: env(safe-area-inset-bottom); }
       <div class="modal-body">
         <label class="kzp-check"><input type="checkbox" id="kzp-haptic" checked> Düğmelerde titreşim</label>
         <p class="notice-box" style="margin-top:1rem;" id="kzp-menu-info"></p>
-        <button type="button" class="btn btn-danger" id="kzp-forget" style="width:100%; margin-top:1rem;">Bu telefonda eşleşmeyi kaldır</button>
+        <div id="kzp-hub-box" style="margin-top:1rem;">
+          <label class="form-label" for="kzp-hub-name">Bu hub'ın adı (yalnız bu telefonda)</label>
+          <div style="display:flex; gap:0.5rem;">
+            <input type="text" id="kzp-hub-name" class="form-input" maxlength="40" style="flex:1; min-width:0;">
+            <button type="button" class="btn" id="kzp-hub-save">Kaydet</button>
+          </div>
+        </div>
+        <button type="button" class="btn btn-danger" id="kzp-forget" style="width:100%; margin-top:1rem;">Bu hub'ın eşleşmesini kaldır</button>
       </div>
     </div>
   </div>
@@ -2705,16 +2723,26 @@ const KzMotion = (() => {
  * bağlantıdaki gizli kısım (#...) adres çubuğundan hemen silinir ve hiçbir sunucuya gitmez.
  * Komutlar: {op:"list",page} | {op:"cmd",id,command} | {op:"pos",id,position}; her mesajda zorunlu "ts" (ms).
  * Canlı hareket (1.3): durum/liste mesajındaki mf/mt/md/me ile konum telefonun kendi saatiyle akıtılır (ui/motion.js).
+ * Birden çok hub (1.5): eşleşmeler hub başına ayrı kayıt (kzp_hubs, anahtar = hubTopic); liste önbelleği kzp_list_<hub>.
+ *   Yalnız SEÇİLİ hub'a bağlanılır; hub değişince bağlantı numarası (gen) artar, eski bağlantının geç gelen mesajları,
+ *   bekleyen yanıtları ve yeniden bağlanma zamanlayıcısı yok sayılır. Her gönderim seçili hub'ın KENDİ anahtarı ve
+ *   konusuyla (aynı kayıttan) yapılır; bir hub'ın anahtarı başka hub'ın konusuna gitmez.
+ *   1.4 ve öncesinin tek kaydı (kzp_pair/kzp_list) ilk açılışta kayıpsız taşınır.
  */
 (function () {
   'use strict';
   const C = window.KuzeyCrypto, M = window.KuzeyMqtt;
-  const LS = { pair: 'kzp_pair', list: 'kzp_list', theme: 'kzp_theme', haptic: 'kzp_haptic', broker: 'kzp_broker' };
+  // pair/list: 1.4 ve öncesinin tek kaydı (yalnız taşıma için okunur)
+  const LS = { hubs: 'kzp_hubs', pair: 'kzp_pair', list: 'kzp_list', theme: 'kzp_theme', haptic: 'kzp_haptic', broker: 'kzp_broker' };
+  const listKey = (t) => 'kzp_list_' + t;
   const PAGE_SIZE = 4;
   const $ = (id) => document.getElementById(id);
 
   const st = {
-    pair: null,          // {t, k, s, name}
+    pair: null,          // seçili hub: {t, k, s, inv, hubName, ek, name, at}
+    store: null,         // {v:2, sel, hubs:{t: kayıt}}
+    gen: 0,              // bağlantı numarası: hub değişince artar
+    local: null,         // cihazın kendi /panel sayfası: {ek} (yalnız o cihaz gösterilir)
     mq: null,
     brokerIdx: 0,
     hubOnline: false,
@@ -2732,6 +2760,43 @@ const KzMotion = (() => {
   const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const nowTs = () => { st.lastTs = Math.max(Date.now(), st.lastTs + 1); return st.lastTs; };
+
+  // ---------- hub deposu (1.5) ----------
+  function loadStore() {
+    const h = lsGet(LS.hubs);
+    if (h && h.v === 2 && h.hubs && typeof h.hubs === 'object') return h;
+    const s = { v: 2, sel: null, hubs: {} };
+    const old = lsGet(LS.pair);
+    if (old && old.t && old.k && old.s) {
+      // 1.4 ve öncesi: tek kayıt -> hub kaydı (anahtar AYNEN taşınır; yeniden davet gerekmez)
+      s.hubs[old.t] = { t: old.t, k: String(old.k), s: old.s, inv: old.name || '', hubName: '', ek: '', name: '', at: Date.now() };
+      s.sel = old.t;
+      const ol = lsGet(LS.list);
+      if (ol) lsSet(listKey(old.t), ol);
+      lsSet(LS.hubs, s);
+      // eski kayıt yalnız yeni kayıt yazılıp GERİ OKUNARAK doğrulandıktan sonra silinir (yarıda kalan taşıma kayıpsız)
+      const back = lsGet(LS.hubs);
+      if (back && back.hubs && back.hubs[old.t] && back.hubs[old.t].s === old.s) {
+        try { localStorage.removeItem(LS.pair); localStorage.removeItem(LS.list); } catch (e) {}
+      }
+    }
+    return s;
+  }
+  function saveStore() { lsSet(LS.hubs, st.store); }
+  function visibleHubs() {
+    let hs = Object.values(st.store.hubs);
+    if (st.local) {   // cihazın kendi sayfası: yalnız o cihaz (eki tutan; ek bilinmiyorsa tek kayıt varsa o)
+      const m = hs.filter((h) => h.ek === st.local.ek);
+      hs = m.length ? m : (hs.length === 1 && !hs[0].ek ? hs : []);
+    }
+    return hs.sort((a, b) => (a.order || 0) - (b.order || 0) || String(a.t).localeCompare(String(b.t)));
+  }
+  function hubLabel(h) {
+    if (h.name) return h.name;
+    if (h.hubName) return h.hubName;
+    const anon = visibleHubs().filter((x) => !x.name && !x.hubName);
+    return anon.length > 1 ? `Kuzey Hub ${anon.indexOf(h) + 1}` : 'Kuzey Hub';
+  }
 
   function toast(msg, type = 'info') {
     const box = $('toast-container'); if (!box) return;
@@ -2774,14 +2839,15 @@ const KzMotion = (() => {
   }
 
   // ---------- MQTT + şifreli zarf ----------
-  const upTopic = () => `rfhub/${st.pair.t}/up`;
+  // Konular ve anahtar her zaman AYNI hub kaydından (st.pair) okunur; bkz. sendOp / onMqttMessage
   const dnTopic = () => `rfhub/${st.pair.t}/dn/${st.pair.k}`;
-  const keyBytes = () => C.b64urlDecode(st.pair.s);
 
   async function sendOp(obj, keyOverride) {
     if (!st.mq || !st.mq.connected) throw new Error('baglanti yok');
-    const env = await C.seal(st.pair.t, Number(st.pair.k), keyOverride || keyBytes(), Object.assign({}, obj, { ts: nowTs() }));
-    st.mq.publish(upTopic(), env);
+    const pair = st.pair, mq = st.mq, gen = st.gen;   // anahtar ve konu AYNI kayıttan
+    const env = await C.seal(pair.t, Number(pair.k), keyOverride || C.b64urlDecode(pair.s), Object.assign({}, obj, { ts: nowTs() }));
+    if (gen !== st.gen || pair !== st.pair || mq !== st.mq) throw new Error('hub degisti');   // şifrelerken hub değiştiyse gönderme
+    mq.publish(`rfhub/${pair.t}/up`, env);
   }
   function waitFor(pred, ms) {
     return new Promise((resolve, reject) => {
@@ -2790,15 +2856,17 @@ const KzMotion = (() => {
     });
   }
   async function onMqttMessage(topic, text) {
-    if (!st.pair || topic !== dnTopic()) return;
+    const pair = st.pair, gen = st.gen;
+    if (!pair || topic !== `rfhub/${pair.t}/dn/${pair.k}`) return;
     let msg = null;
     const keys = [];
     if (st.claimKey) keys.push(st.claimKey);
-    keys.push(keyBytes());
+    keys.push(C.b64urlDecode(pair.s));
     for (const k of keys) {
-      try { msg = await C.open(st.pair.t, Number(st.pair.k), k, text); break; } catch (e) {}
+      try { msg = await C.open(pair.t, Number(pair.k), k, text); break; } catch (e) {}
     }
     if (!msg) return; // başka anahtara ait / bozuk: yok say
+    if (gen !== st.gen || pair !== st.pair) return;   // çözülürken hub değişti: bu mesaj artık seçili hub'a ait değil
     markHubOnline();
     for (const w of st.waiters.slice()) {
       if (w.pred(msg)) { clearTimeout(w.timer); st.waiters = st.waiters.filter((x) => x !== w); w.resolve(msg); }
@@ -2819,6 +2887,8 @@ const KzMotion = (() => {
   async function connect() {
     clearTimeout(st.reconnectTimer);
     if (!navigator.onLine) { goOffline(); return; }
+    if (!st.pair) return false;
+    const gen = st.gen;
     st.hubOnline = false;
     setConn('connecting');
     const order = [st.brokerIdx, ...M.BROKERS.map((_, i) => i).filter((i) => i !== st.brokerIdx)];
@@ -2827,8 +2897,9 @@ const KzMotion = (() => {
       try {
         const mq = new M.MiniMqtt(b.url);
         await mq.connect(8000);
+        if (gen !== st.gen) { try { mq.close(); } catch (_) {} return false; }   // bağlanırken hub değişti
         mq.onMessage = onMqttMessage;
-        mq.onClose = () => { st.hubOnline = false; goOffline(); scheduleReconnect(); };
+        mq.onClose = () => { if (gen !== st.gen || st.mq !== mq) return; st.hubOnline = false; goOffline(); scheduleReconnect(); };
         mq.subscribe(dnTopic());
         if (st.mq && st.mq !== mq) {   // eski bağlantıyı SESSİZCE kapat (kapanma olayı "çevrimdışı" yapmasın)
           st.mq.onClose = () => {}; st.mq.onMessage = () => {};
@@ -2836,13 +2907,16 @@ const KzMotion = (() => {
         }
         st.mq = mq;
         await new Promise((r) => setTimeout(r, 400)); // abonelik otursun
+        if (gen !== st.gen) return false;
         if (st.claimPending) { st.brokerIdx = idx; return true; }
         // Cihaz bu aracıda mı? (cihaz yedek aracıya geçmiş olabilir) — liste isteğiyle sına
         const ok = await refreshList(true);
+        if (gen !== st.gen) return false;
         if (ok) { st.brokerIdx = idx; lsSet(LS.broker, idx); st.reconnectDelay = 2000; return true; }
         mq.close();
       } catch (e) { /* sıradaki aracı */ }
     }
+    if (gen !== st.gen) return false;
     st.hubOnline = false;
     goOffline(st.mq ? 'Cihaz yanıt vermiyor' : null);
     scheduleReconnect();
@@ -2857,6 +2931,7 @@ const KzMotion = (() => {
 
   // ---------- liste ----------
   async function refreshList(quiet) {
+    const gen = st.gen, pair = st.pair;
     try {
       const first = await requestPage(1);
       let all = first.items || first.devices || [];
@@ -2864,9 +2939,13 @@ const KzMotion = (() => {
         const r = await requestPage(p);
         all = all.concat(r.items || r.devices || []);
       }
+      if (gen !== st.gen || pair !== st.pair) return false;   // bu liste artık seçili hub'ın değil
+      if (first.hub && (first.hub !== pair.hubName || first.ek !== pair.ek)) {   // 1.5 cihaz: hub adı ve eki
+        pair.hubName = String(first.hub).slice(0, 40); pair.ek = String(first.ek || ''); saveStore(); renderHubBar();
+      }
       all.forEach((d) => KzMotion.sync(d, d._lat));
       st.devices = all;
-      lsSet(LS.list, { at: Date.now(), devices: all });
+      lsSet(listKey(pair.t), { at: Date.now(), devices: all });
       const maxPage = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
       if (st.page > maxPage) st.page = maxPage;
       render();
@@ -2981,7 +3060,7 @@ const KzMotion = (() => {
     if (m.state) d.state = m.state;
     if (typeof m.position === 'number') d.position = m.position;
     if (typeof m.position === 'number' || typeof m.md === 'number') KzMotion.sync(m, lat);
-    lsSet(LS.list, { at: Date.now(), devices: st.devices });
+    if (st.pair) lsSet(listKey(st.pair.t), { at: Date.now(), devices: st.devices });
     const card = document.getElementById('kzp-card-' + m.id);
     if (card) card.innerHTML = cardInner(d);
     if ($('kzp-detail').classList.contains('open') && st.detailId === m.id) renderDetail(m.id);
@@ -3045,14 +3124,18 @@ const KzMotion = (() => {
     const p = new URLSearchParams(h);
     const t = p.get('t'), k = p.get('k'), s = p.get('s');
     if (!t || !k || !s || !/^[0-9a-f]{32}$/.test(t) || !/^\d{1,3}$/.test(k)) return null;
-    return { t, k: String(Number(k)), s };
+    const n = (p.get('n') || '').replace(/[^\p{L}\p{N} ._-]/gu, '').slice(0, 40);   // 1.5: hub adı (eski davette yok)
+    return { t, k: String(Number(k)), s, n };
   }
   async function claim(inv) {
     // Gizli kısmı adres çubuğundan ve geçmişten hemen sil (sunucuya zaten gitmez; ekran görüntüsü/paylaşımda da görünmesin)
     try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
-    const existing = lsGet(LS.pair);
-    if (existing && existing.t === inv.t && existing.k === inv.k) { st.pair = existing; return true; } // aynı davet yeniden açıldı
+    const existing = st.store.hubs[inv.t];
+    const prevSel = st.pair;
+    if (existing && existing.k === inv.k) { useHub(existing); return true; } // aynı davet yeniden açıldı
     showPair('', 'Eşleştiriliyor…', 'Kuzey Hub ile güvenli bağlantı kuruluyor. Lütfen bekleyin.');
+    st.gen++;
+    if (st.mq) { st.mq.onClose = () => {}; st.mq.onMessage = () => {}; try { st.mq.close(); } catch (_) {} st.mq = null; }
     st.pair = { t: inv.t, k: inv.k, s: inv.s };
     st.claimKey = C.randomBytes(32);
     st.claimPending = true;
@@ -3072,13 +3155,22 @@ const KzMotion = (() => {
       }
       if (!res) throw new Error('yanit');
       if (res.op === 'err') throw new Error(res.code);
-      st.pair = { t: inv.t, k: inv.k, s: C.b64urlEncode(st.claimKey), name: res.name || '' };
-      lsSet(LS.pair, st.pair);
+      // Yeni hub EKLENİR; aynı hub'ın yeni daveti yalnız o hub'ın kaydını yeniler (kullanıcının verdiği ad korunur)
+      const order = existing ? existing.order : Object.keys(st.store.hubs).length;
+      st.store.hubs[inv.t] = {
+        t: inv.t, k: inv.k, s: C.b64urlEncode(st.claimKey), inv: res.name || '',
+        hubName: String(res.hub || inv.n || (existing && existing.hubName) || '').slice(0, 40),
+        ek: String(res.ek || (existing && existing.ek) || ''), name: existing ? existing.name : '', at: Date.now(), order,
+      };
+      if (existing && existing.k !== inv.k) { try { localStorage.removeItem(listKey(inv.t)); } catch (e) {} }
+      st.store.sel = inv.t;
+      saveStore();
+      st.pair = st.store.hubs[inv.t];
       st.claimKey = null; st.claimPending = false;
       haptic();
       return true;
     } catch (e) {
-      st.claimKey = null; st.claimPending = false; st.pair = existing || null;
+      st.claimKey = null; st.claimPending = false; st.gen++; st.pair = prevSel || null;   // önceki seçim aynen döner
       const map = {
         invite_expired: 'Davetin süresi dolmuş. Kurulumcunuzdan yeni bir davet isteyin.',
         already_claimed: 'Bu davet daha önce kullanılmış. Kurulumcunuzdan yeni bir davet isteyin.',
@@ -3109,18 +3201,39 @@ const KzMotion = (() => {
     document.querySelectorAll('.modal-overlay').forEach((o) => o.addEventListener('click', (e) => { if (e.target === o) { o.classList.remove('open'); st.detailId = null; } }));
     $('kzp-menu-btn').onclick = () => {
       $('kzp-haptic').checked = lsGet(LS.haptic) !== false;
-      $('kzp-menu-info').innerText = st.pair ? `Bu telefon "${st.pair.name || 'Kuzey Hub'}" anahtarıyla eşleşmiş. Anahtar yalnız bu tarayıcıda saklanır.` : 'Bu telefon henüz eşleşmemiş.';
+      const n = visibleHubs().length;
+      $('kzp-menu-info').innerText = st.pair
+        ? `Bu telefon "${hubLabel(st.pair)}" ile eşleşmiş${n > 1 ? ` (bu telefonda ${n} hub)` : ''}. Anahtar yalnız bu tarayıcıda saklanır.`
+        : 'Bu telefon henüz eşleşmemiş.';
+      $('kzp-hub-box').hidden = !st.pair;
+      $('kzp-hub-name').value = st.pair ? hubLabel(st.pair) : '';
       $('kzp-forget').hidden = !st.pair;
       $('kzp-menu').classList.add('open');
     };
+    $('kzp-hub-save').onclick = () => {
+      if (!st.pair) return;
+      const v = $('kzp-hub-name').value.trim().slice(0, 40);
+      st.pair.name = (v && v !== st.pair.hubName) ? v : '';   // boş ya da cihazın adıyla aynı: varsayılana dön
+      saveStore(); renderHubBar(); haptic(); toast('Hub adı kaydedildi (yalnız bu telefonda)', 'success');
+    };
+    $('kzp-hub-sel').onchange = (e) => { const h = st.store.hubs[e.target.value]; if (h) { haptic(); useHub(h, true); } };
     $('kzp-haptic').onchange = (e) => { lsSet(LS.haptic, e.target.checked); if (e.target.checked) haptic(); };
     $('kzp-forget').onclick = () => {
-      if (!confirm('Bu telefondaki eşleşme silinsin mi? Yeniden kullanmak için yeni bir davet gerekir.')) return;
-      try { localStorage.removeItem(LS.pair); localStorage.removeItem(LS.list); } catch (e) {}
-      location.reload();
+      if (!st.pair) return;
+      const ad = hubLabel(st.pair);
+      if (!confirm(`"${ad}" eşleşmesi bu telefondan kaldırılsın mı? Diğer hub'lar etkilenmez. Yeniden kullanmak için yeni bir davet gerekir.`)) return;
+      const t = st.pair.t;
+      delete st.store.hubs[t];
+      try { localStorage.removeItem(listKey(t)); } catch (e) {}
+      st.store.sel = null;
+      saveStore();
+      $('kzp-menu').classList.remove('open');
+      const rest = visibleHubs().sort((a, b) => (b.at || 0) - (a.at || 0));
+      if (rest.length) { useHub(rest[0], true); toast(`"${ad}" kaldırıldı`, 'success'); }
+      else location.reload();
     };
     // Panel açıkken davet bağlantısı açılırsa (yalnız # değişir, sayfa yüklenmez) eşleştirmeyi başlat
-    window.addEventListener('hashchange', () => { if (parseHash()) location.reload(); });
+    window.addEventListener('hashchange', () => { if (parseHash()) location.reload(); });   // yeni hub daveti: eklenir
     window.addEventListener('online', () => { if (st.pair) connect(); });
     window.addEventListener('offline', () => { st.hubOnline = false; goOffline(); });
     document.addEventListener('visibilitychange', () => {
@@ -3137,30 +3250,70 @@ const KzMotion = (() => {
     }
   }
 
+  // ---------- hub seçimi (1.5) ----------
+  // Seçili hub'ın önbellekteki listesini gösterir (hareket bilgisi eski olduğundan atılır; canlı liste gelince akış sürer)
+  function showMainFor(pair) {
+    $('kzp-pair').hidden = true; $('kzp-main').hidden = false;
+    const cached = lsGet(listKey(pair.t));
+    st.devices = (cached && Array.isArray(cached.devices) ? cached.devices : [])
+      .map((d) => { const c = Object.assign({}, d); delete c.md; delete c.mf; delete c.mt; delete c.me; return c; });
+    st.page = 1;
+    render();
+    renderHubBar();
+  }
+  // Hub değiştir: önceki bağlantı TEMİZ kapanır, bekleyen yanıtlar/zamanlayıcı düşer, canlı hareket durumu sıfırlanır
+  function useHub(h, reconnect) {
+    const same = st.pair === h;
+    if (!same) {
+      st.gen++;
+      clearTimeout(st.reconnectTimer);
+      if (st.mq) { st.mq.onClose = () => {}; st.mq.onMessage = () => {}; try { st.mq.close(); } catch (_) {} st.mq = null; }
+      st.waiters.forEach((w) => { clearTimeout(w.timer); }); st.waiters = [];
+      st.devices.forEach((d) => KzMotion.forget(d.id));
+      st.pendingCmd = null; st.detailId = null; $('kzp-detail').classList.remove('open');
+      st.hubOnline = false; st.reconnectDelay = 2000;
+    }
+    st.pair = h;
+    h.at = Date.now(); st.store.sel = h.t; saveStore();
+    if (!same) showMainFor(h); else renderHubBar();
+    if (reconnect && !same) connect();
+  }
+  // Üstte hub seçici: yalnız birden çok hub varken (tek hub'da panel bugünkü gibi)
+  function renderHubBar() {
+    const hs = visibleHubs();
+    const bar = $('kzp-hubbar'), sel = $('kzp-hub-sel');
+    bar.hidden = hs.length < 2;
+    sel.innerHTML = hs.map((h) => `<option value="${esc(h.t)}"${h === st.pair ? ' selected' : ''}>${esc(hubLabel(h))}</option>`).join('');
+    $('kzp-title').innerText = hs.length > 1 && st.pair ? hubLabel(st.pair) : 'Kuzey Hub';
+  }
+
   // ---------- başlangıç ----------
   async function start() {
     initTheme();
     bindEvents();
     const b = lsGet(LS.broker); if (typeof b === 'number' && b < M.BROKERS.length) st.brokerIdx = b;
+    st.store = loadStore();
+    if (/\/panel\/?$/.test(location.pathname)) {   // cihazın kendi sayfası (ev içi): yalnız o cihaz
+      try { const j = await (await fetch('/api/status', { cache: 'no-store' })).json(); if (j && j.ek) st.local = { ek: String(j.ek) }; } catch (e) {}
+    }
+    const vis = visibleHubs();
+    st.pair = st.store.hubs[st.store.sel] && vis.includes(st.store.hubs[st.store.sel]) ? st.store.hubs[st.store.sel]
+      : (vis.sort((a, b) => (b.at || 0) - (a.at || 0))[0] || null);
     const inv = parseHash();
     if (inv) {
       const ok = await claim(inv);
-      if (!ok) return;
-    } else {
-      st.pair = lsGet(LS.pair);
+      if (!ok) {   // eşleşemedi: önceki hub'lar aynen kalır; hata bildirimle gösterilir
+        if (st.pair) { const msg = $('kzp-pair-text').innerText; showMainFor(st.pair); toast(msg, 'danger'); connect(); }
+        return;
+      }
     }
+    renderHubBar();
     if (!st.pair) {
       setConn('offline', 'Eşleşmemiş');
       showPair('', 'Telefon eşleşmemiş', 'Bu panel, kurulumcunuzun verdiği QR kod ya da davet bağlantısıyla bir kez eşleştirilir. QR kodu telefonunuzun kamerasıyla okutun.');
       return;
     }
-    $('kzp-pair').hidden = true; $('kzp-main').hidden = false;
-    const cached = lsGet(LS.list);
-    if (cached && Array.isArray(cached.devices)) {
-      // Önbellekteki hareket bilgisi eskidir: yalnız son konum gösterilir, canlı liste gelince akış sürer
-      st.devices = cached.devices.map((d) => { const c = Object.assign({}, d); delete c.md; delete c.mf; delete c.mt; delete c.me; return c; });
-      render();
-    }
+    showMainFor(st.pair);
     if (!navigator.onLine) { goOffline(); return; }
     if (st.mq && st.mq.connected) {           // eşleşmeden kalan bağlantıyı kullan
       setConn('connecting');
