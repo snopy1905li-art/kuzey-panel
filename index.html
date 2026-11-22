@@ -592,10 +592,8 @@ body {
   font-weight: 700 !important;
 }
 
-.btn-stop:hover {
-  background: var(--danger) !important;
-  color: #ffffff !important;
-  border-color: var(--danger) !important;
+@media (hover: hover) {   /* 1.12: dokunmatikte "yapışkan" hover okunmaz yazı bırakıyordu */
+  .btn-stop:hover { background: var(--danger) !important; color: #ffffff !important; border-color: var(--danger) !important; }
 }
 
 /* Fixed-Code LED Key Grid */
@@ -1026,6 +1024,27 @@ body {
   }
 }
 
+/* 1.12 (müşteri denemesi): telefonda giriş yapanın adı görünsün; ayar sekmeleri alt satıra geçsin; kırmızı uyarı */
+@media (max-width: 640px) {
+  .header-actions .btn #admin-btn-label { display: inline; max-width: 6.5em; overflow: hidden; text-overflow: ellipsis; font-size: .75rem; }
+  .header-actions #admin-main-btn { width: auto; padding: 0 .55rem; }
+  .settings-tabs { flex-wrap: wrap; overflow-x: visible; }
+  #hub-ip-badge, .hub-ip-sep { display: none; }
+}
+@media (max-width: 640px) { .toast-container { top: 4.5rem; bottom: auto; left: 1rem; right: 1rem; } }
+.settings-card.besleme-uyari { font-size: .95rem; }
+.btn:disabled, .btn[disabled] { opacity: .45; cursor: not-allowed; filter: grayscale(.6); }
+.bekle-serit { position: fixed; top: 0; left: 0; right: 0; z-index: 300; margin: 0; border-radius: 0; font-weight: 600; }
+.card-badges .badge { white-space: nowrap; }
+.kb-dim { opacity: .35; pointer-events: auto; }
+.uyari-sari { border-left-color: var(--warning); color: var(--text-main); }
+.uyari-dolu { background: var(--danger-light); }
+.yatay-ipucu { display: none; font-size: .75rem; color: var(--text-muted); text-align: right; margin: 0 0 .25rem; }
+#edit-manual-state { min-width: 9.5rem; }
+#admin-btn-label:not(:empty) { margin-left: .3rem; }
+@media (max-width: 640px) { .yatay-ipucu { display: block; } .toast { font-size: .85rem; padding: .5rem .75rem; } }
+.uyari-kirmizi { border-left-color: var(--danger); color: var(--text-main); font-weight: 600; }
+body.ayar-acik main > :not(#settings-view) { display: none; }
 @media (max-width: 360px) {
   /* Extra narrow screens (320px) */
   #hub-ip-badge,
@@ -1056,6 +1075,9 @@ body {
     padding: 0.75rem 0.5rem 2rem 0.5rem;
   }
 }
+
+/* 1.6: kart içi bağlantılar temaya uyar (koyu temada varsayılan mavi okunmuyordu) */
+#hubs-list a, #metric-mdns a { color: var(--primary); }
 
 </style>
   <style>
@@ -1179,7 +1201,7 @@ body.kzp { min-height: 100vh; padding-bottom: env(safe-area-inset-bottom); }
           <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/></svg>
         </div>
         <h2 id="kzp-pair-title">Telefon eşleşmemiş</h2>
-        <p id="kzp-pair-text">Bu panel, kurulumcunuzun verdiği QR kod ya da davet bağlantısıyla bir kez eşleştirilir. QR kodu telefonunuzun kamerasıyla okutun.</p>
+        <p id="kzp-pair-text">Bu panel, ev sahibinin verdiği QR kod ya da davet bağlantısıyla bir kez eşleştirilir. QR kodu telefonunuzun kamerasıyla okutun.</p>
       </div>
     </section>
 
@@ -2837,6 +2859,7 @@ const KzMotion = (() => {
     const saved = lsGet(LS.theme);
     const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
     applyTheme(saved || (prefersDark ? 'dark' : 'light'));
+    if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (m) => { if (!lsGet(LS.theme)) applyTheme(m.matches ? 'dark' : 'light'); });
     $('kzp-theme').onclick = () => {
       const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
       lsSet(LS.theme, next); applyTheme(next); haptic();
@@ -2849,6 +2872,11 @@ const KzMotion = (() => {
     $('kzp-conn-label').innerText = label || ({ online: 'Çevrimiçi', connecting: 'Bağlanıyor…', offline: 'Bağlantı yok' })[state];
     const off = state === 'offline';
     $('kzp-offline').hidden = !off || !st.pair;
+    // 1.12: aracıya (internet) bağlı ama cihaz yanıt vermiyorsa erişim kaldırılmış da olabilir; cihaz tanımadığı
+    // anahtara bilerek yanıt vermez (karar B), bu yüzden ikisi ayırt edilemez ve ikisi birden söylenir
+    $('kzp-offline').innerText = label === 'Cihaz yanıt vermiyor'
+      ? 'Cihaz yanıt vermiyor ya da bu telefonun erişimi kaldırılmış olabilir. Ev sahibinden yeni davet isteyin.'
+      : 'Bağlantı yok. Son bilinen durum gösteriliyor; komut gönderilemez. İnternet bağlantınızı kontrol edin.';
     document.querySelectorAll('.remote-card').forEach((c) => c.classList.toggle('kzp-disabled', state !== 'online'));
   }
 
@@ -2893,9 +2921,11 @@ const KzMotion = (() => {
     }
     if (msg.op === 'alarm') c6AlarmAyarla(pair, msg.alarm === 'yangin');   // C6: yangın başladı/bitti (C3 hiç göndermez)
     if (msg.op === 'err' && msg.code === 'expired') toast('Telefon saati cihazla uyuşmuyor. Saat ayarını otomatik yapın.', 'danger');
+    if (msg.op === 'err' && msg.code === 'kayit') toast('Cihaz kaydı yapamadı, komut gönderilmedi. Ev sahibine haber verin.', 'danger');   // 1.12
   }
   function markHubOnline() {
     st.hubOnline = true;
+    st.sessiz = false;
     if ($('kzp-conn').dataset.state !== 'online') setConn('online');
   }
 
@@ -2905,7 +2935,7 @@ const KzMotion = (() => {
     if (!st.pair) return false;
     const gen = st.gen;
     st.hubOnline = false;
-    setConn('connecting');
+    if (!st.sessiz) setConn('connecting');   // 1.12: cihaz sessizken "erişim kaldırılmış olabilir" iletisi yeniden denemede kaybolmasın
     const order = [st.brokerIdx, ...M.BROKERS.map((_, i) => i).filter((i) => i !== st.brokerIdx)];
     for (const idx of order) {
       const b = M.BROKERS[idx];
@@ -2934,6 +2964,7 @@ const KzMotion = (() => {
     }
     if (gen !== st.gen) return false;
     st.hubOnline = false;
+    if (st.mq) st.sessiz = true;
     goOffline(st.mq ? 'Cihaz yanıt vermiyor' : null);
     scheduleReconnect();
     return false;
@@ -2996,7 +3027,7 @@ const KzMotion = (() => {
     const hasSensor = d.sn === 1 || d.positionVerified === true;
     const mp = KzMotion.pos(d.id);
     const pos = Math.max(0, Math.min(100, Math.round(mp != null ? mp : (Number(d.position) || 0))));
-    let badgeClass = `badge-state-${d.state || 'stopped'}`, badge = stateLabel(d.state);
+    let badgeClass = `badge-state-${d.state || 'stopped'}`, badge = d.kb && !single ? 'Konum bilinmiyor' : stateLabel(d.state);
     if (single) {
       if (hasSensor) { badge = d.state === 'closed' ? 'Kapalı' : 'Açık'; badgeClass = `badge-state-${d.state === 'closed' ? 'closed' : 'open'}`; }
       else { badge = ''; } // tek tuşlu + sensörsüz: Açık/Kapalı gösterilmez
@@ -3007,7 +3038,7 @@ const KzMotion = (() => {
     if (!single && (!isLight(d) || d.deviceType === 'light_dimmer')) {
       slider = `
         <div class="slider-container">
-          <div class="slider-label-row"><span>Konum</span><span class="slider-pct" data-pct="${esc(d.id)}">%${pos}</span></div>
+          <div class="slider-label-row"><span>Konum</span><span class="slider-pct" data-pct="${esc(d.id)}">${d.kb && !single ? '—' : '%' + pos}</span></div>
           <input type="range" min="0" max="100" value="${pos}" class="pos-slider" data-slider="${esc(d.id)}" aria-label="${esc(d.name)} konum">
         </div>`;
     }
@@ -3040,6 +3071,13 @@ const KzMotion = (() => {
       ${slider}
       ${controls}`;
   }
+  // 1.12: cihaz "yok" dedi (kumanda silinmiş): listeden düşür, listeyi yenile
+  function kumandaDusur(id) {
+    st.devices = st.devices.filter((x) => x.id !== id);
+    render();
+    toast('Bu kumanda ev sahibi tarafından kaldırılmış.', 'info');
+    refreshList(true);
+  }
   function render() {
     const list = $('kzp-list');
     const total = st.devices.length;
@@ -3047,7 +3085,7 @@ const KzMotion = (() => {
     const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     const slice = st.devices.slice((st.page - 1) * PAGE_SIZE, st.page * PAGE_SIZE);
     list.innerHTML = slice.length ? slice.map((d) => `<div class="remote-card" id="kzp-card-${esc(d.id)}">${cardInner(d)}</div>`).join('')
-      : `<div class="notice-box" style="grid-column:1/-1;">Bu telefona tanımlı kumanda yok. Kurulumcunuzla görüşün.</div>`;
+      : `<div class="notice-box" style="grid-column:1/-1;">Bu telefona tanımlı kumanda yok. Ev sahibinizle görüşün.</div>`;
     $('kzp-pager').hidden = pages <= 1;
     $('kzp-page-label').innerText = `${st.page} / ${pages}`;
     $('kzp-prev').disabled = st.page <= 1;
@@ -3116,12 +3154,15 @@ const KzMotion = (() => {
       if (d && d.bm === 's') toast('Komut gönderildi', 'success');
     } catch (e) {
       haptic('error');
+      if (e.message === 'yok') { kumandaDusur(id); return; }   // 1.12: kumanda ev sahibi tarafından silinmiş
       if (frozen) {
         KzMotion.restore(id, frozen);
         if (d) { d.state = prevState; applyState({ id, state: prevState }); }
         toast('Durdur komutu cihaza ulaşmadı — hareket sürüyor olabilir', 'danger');
       } else {
+        if (d) { d.state = prevState; applyState({ id, state: prevState }); }   // 1.12: kart takılı kalmasın
         toast(e.message === 'zaman asimi' ? 'Cihaz yanıt vermedi' : 'Komut iletilemedi', 'danger');
+        if (e.message === 'zaman asimi') { st.hubOnline = false; st.sessiz = true; goOffline('Cihaz yanıt vermiyor'); }
       }
       refreshList(true);
     } finally { if (btn) setTimeout(() => btn.classList.remove('btn-action-flash'), 300); }
@@ -3136,7 +3177,7 @@ const KzMotion = (() => {
       sliderBusy[id] = false;
       if (r.op === 'err') throw new Error(r.code);
       toast(`Konum %${position} gönderildi`, 'success');
-    } catch (e) { sliderBusy[id] = false; haptic('error'); toast('Konum iletilemedi', 'danger'); refreshList(true); }
+    } catch (e) { sliderBusy[id] = false; haptic('error'); if (e.message === 'yok') return kumandaDusur(id); toast('Konum iletilemedi', 'danger'); refreshList(true); }
   }
 
   // ---------- eşleştirme ----------
@@ -3158,8 +3199,12 @@ const KzMotion = (() => {
     try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
     const existing = st.store.hubs[inv.t];
     const prevSel = st.pair;
-    if (existing && existing.k === inv.k) { useHub(existing); return true; } // aynı davet yeniden açıldı
-    showPair('', 'Eşleştiriliyor…', 'Kuzey Hub ile güvenli bağlantı kuruluyor. Lütfen bekleyin.');
+    if (existing && existing.k === inv.k) { useHub(existing); toast('Bu davet bu telefonda zaten kullanıldı.', 'info'); return true; } // aynı davet yeniden açıldı
+    // 1.12: yarım kopyalanmış bağlantı (konu 32 hex, anahtar 32 bayt = 43 karakter) cihaza hiç sorulmadan anlaşılır
+    let tam = /^[0-9a-f]{32}$/.test(String(inv.t || '')) && Number(inv.k) > 0;
+    try { tam = tam && C.b64urlDecode(String(inv.s || '')).length === 32; } catch (e) { tam = false; }
+    if (!tam) { setConn('offline', 'Eşleşme yok'); showPair('error', 'Eşleştirilemedi', 'Bağlantı eksik ya da daha önce kullanılmış. Ev sahibinden yeni davet isteyin. (Bağlantıyı eksiksiz açtığınızdan emin olun ya da kare kodu okutun.)'); haptic('error'); return false; }
+    showPair('', 'Davet denetleniyor…', 'Kuzey Hub ile güvenli bağlantı kuruluyor; davet denetleniyor (en çok ~40 sn). Lütfen bekleyin.');
     st.gen++;
     if (st.mq) { st.mq.onClose = () => {}; st.mq.onMessage = () => {}; try { st.mq.close(); } catch (_) {} st.mq = null; }
     st.pair = { t: inv.t, k: inv.k, s: inv.s };
@@ -3169,10 +3214,11 @@ const KzMotion = (() => {
       const connected = await connect();
       if (!connected && !(st.mq && st.mq.connected)) throw new Error('aracı');
       let res = null;
-      for (let attempt = 0; attempt < 2 && !res; attempt++) {
-        if (attempt === 1) { // cihaz diğer aracıda olabilir
-          st.brokerIdx = (st.brokerIdx + 1) % M.BROKERS.length; await connect();
-        }
+      // 1.12: genel aracı paketi zaman zaman iletmiyor (müşteri denemesi): önce AYNI aracıya yeni bağlantıyla
+      // yeniden dene, sonra yedek aracıya geç (cihaz yedeğe geçmiş olabilir)
+      for (let attempt = 0; attempt < 3 && !res; attempt++) {
+        if (attempt === 1) await connect();
+        if (attempt === 2) { st.brokerIdx = (st.brokerIdx + 1) % M.BROKERS.length; await connect(); }
         try {
           const wait = waitFor((m) => m.op === 'claimed' || m.op === 'err', 7000);
           await sendOp({ op: 'claim', nk: C.b64urlEncode(st.claimKey) }, C.b64urlDecode(inv.s));
@@ -3198,12 +3244,13 @@ const KzMotion = (() => {
     } catch (e) {
       st.claimKey = null; st.claimPending = false; st.gen++; st.pair = prevSel || null;   // önceki seçim aynen döner
       const map = {
-        invite_expired: 'Davetin süresi dolmuş. Kurulumcunuzdan yeni bir davet isteyin.',
-        already_claimed: 'Bu davet daha önce kullanılmış. Kurulumcunuzdan yeni bir davet isteyin.',
-        yanit: 'Davet bağlantısı daha önce kullanılmış, iptal edilmiş ya da cihaz şu an çevrimdışı. Kurulumcunuzla görüşün.',
+        invite_expired: 'Davetin süresi dolmuş. Ev sahibinden yeni bir davet isteyin.',
+        already_claimed: 'Bağlantı eksik ya da daha önce kullanılmış. Ev sahibinden yeni davet isteyin.',
+        eksik: 'Bağlantı eksik ya da daha önce kullanılmış. Ev sahibinden yeni davet isteyin.',
+        yanit: 'Bağlantı eksik ya da daha önce kullanılmış. Ev sahibinden yeni davet isteyin. (Cihaz o an kapalıysa daha sonra yeniden deneyin.)',
         'aracı': 'İnternet bağlantısı kurulamadı. Bağlantınızı kontrol edip bağlantıyı yeniden açın.',
       };
-      showPair('error', 'Eşleştirilemedi', map[e.message] || 'Eşleştirme başarısız oldu. Kurulumcunuzdan yeni bir davet isteyin.');
+      showPair('error', 'Eşleştirilemedi', map[e.message] || 'Eşleştirme başarısız oldu. Ev sahibinden yeni bir davet isteyin.');
       haptic('error');
       if (st.mq) try { st.mq.close(); } catch (_) {}
       return false;
@@ -3211,6 +3258,16 @@ const KzMotion = (() => {
   }
 
   // ---------- olaylar ----------
+  // 1.12: panel ekranda açıkken 30 sn'de bir yokla (yalnız sayfa GÖRÜNÜRKEN; arka planda pil/trafik harcamaz).
+  // Cihaz yanıt vermezse (erişim kaldırılmış ya da cihaz kapalı) "Çevrimiçi" en geç ~40 sn'de düşer.
+  async function yokla() {
+    if (document.visibilityState !== 'visible' || !st.pair || st.claimPending || !st.mq || !st.mq.connected) return;
+    const pair = st.pair, ok = await refreshList(true);
+    if (!ok && pair === st.pair && !st.claimPending) { st.hubOnline = false; st.sessiz = true; goOffline('Cihaz yanıt vermiyor'); }
+  }
+  setInterval(yokla, 30000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') yokla(); });
+
   function bindEvents() {
     $('kzp-list').addEventListener('click', onCardClick);
     $('kzp-detail-body').addEventListener('click', onCardClick);
@@ -3310,7 +3367,7 @@ const KzMotion = (() => {
     const bar = $('kzp-hubbar'), sel = $('kzp-hub-sel');
     bar.hidden = hs.length < 2;
     sel.innerHTML = hs.map((h) => `<option value="${esc(h.t)}"${h === st.pair ? ' selected' : ''}>${st.c6al[h.t] ? 'YANGIN! ' : ''}${esc(hubLabel(h))}</option>`).join('');
-    $('kzp-title').innerText = hs.length > 1 && st.pair ? hubLabel(st.pair) : 'Kuzey Hub';
+    $('kzp-title').innerText = st.pair ? (hs.length > 1 ? hubLabel(st.pair) : (st.pair.name || st.pair.hubName || 'Kuzey Hub')) : 'Kuzey Hub';
     c6Ciz();
   }
 
@@ -3424,7 +3481,7 @@ const KzMotion = (() => {
     renderHubBar();
     if (!st.pair) {
       setConn('offline', 'Eşleşmemiş');
-      showPair('', 'Telefon eşleşmemiş', 'Bu panel, kurulumcunuzun verdiği QR kod ya da davet bağlantısıyla bir kez eşleştirilir. QR kodu telefonunuzun kamerasıyla okutun.');
+      showPair('', 'Telefon eşleşmemiş', 'Bu panel, ev sahibinin verdiği QR kod ya da davet bağlantısıyla bir kez eşleştirilir. QR kodu telefonunuzun kamerasıyla okutun.');
       return;
     }
     showMainFor(st.pair);

@@ -5,7 +5,7 @@
  */
 // Önbellek sürümü panel değiştikçe artar (1.5: v2, 1.6 ortak panel: v3) -> eski kabuk silinir, yeni panel alınır.
 // Eşleşmeler localStorage'da (önbellekte değil): korunur.
-const CACHE = 'kuzey-panel-v3';
+const CACHE = 'kuzey-panel-v4';   // 1.12: erişim/davet iletileri, başlıkta ek
 const SHELL = ['./', './index.html'];
 
 self.addEventListener('install', (e) => {
